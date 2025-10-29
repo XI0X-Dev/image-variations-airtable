@@ -120,19 +120,59 @@ async function getResult(requestId) {
 }
 
 async function appendOutputs(recordId, { outputs = [], requestId, failed = false }) {
-  const rec = await atGet(recordId);
-  const f = rec.fields || {};
-  const prev = Array.isArray(f["Output"]) ? f["Output"] : [];
-  const newOutputs = [...prev, ...outputs.map((url, i) => ({ url, filename: `var_${requestId}_${i}.png` }))];
+  // Add small random delay to prevent concurrent updates
+  await sleep(Math.floor(Math.random() * 800) + 200);
+  
+  let retries = 3;
+  while (retries > 0) {
+    try {
+      const rec = await atGet(recordId);
+      const f = rec.fields || {};
+      const prev = Array.isArray(f["Output"]) ? f["Output"] : [];
+      
+      // Don't include id field in new attachments - let Airtable generate them
+      const newOutputs = [
+        ...prev, 
+        ...outputs.map((url, i) => ({ 
+          url: url, 
+          filename: `var_${requestId}_${i}.png` 
+        }))
+      ];
 
-  await atPatch(recordId, {
-    Output: newOutputs,
-    "Seen IDs": mergeIds(f["Seen IDs"], [requestId]),
-    "Failed IDs": failed ? mergeIds(f["Failed IDs"], [requestId]) : f["Failed IDs"],
-    "Last Update": nowISO(),
-  });
+      await atPatch(recordId, {
+        Output: newOutputs,
+        "Seen IDs": mergeIds(f["Seen IDs"], [requestId]),
+        "Failed IDs": failed ? mergeIds(f["Failed IDs"], [requestId]) : f["Failed IDs"],
+        "Last Update": nowISO(),
+      });
 
-  await markCompleted(recordId);
+      await markCompleted(recordId);
+      console.log(`[APPEND SUCCESS] ${requestId}`);
+      return; // Success!
+      
+    } catch (err) {
+      retries--;
+      console.error(`[APPEND ERROR] ${requestId} (${retries} retries left):`, err.message);
+      if (retries > 0) {
+        await sleep(1000 + Math.random() * 1000);
+      } else {
+        // Last attempt: at least mark as seen so status can be completed
+        console.warn(`[APPEND FINAL FALLBACK] ${requestId} - marking as seen only`);
+        try {
+          const rec = await atGet(recordId);
+          const f = rec.fields || {};
+          await atPatch(recordId, {
+            "Seen IDs": mergeIds(f["Seen IDs"], [requestId]),
+            "Failed IDs": mergeIds(f["Failed IDs"], [requestId]),
+            "Last Update": nowISO(),
+          });
+          await markCompleted(recordId);
+        } catch (finalErr) {
+          console.error(`[APPEND FINAL ERROR] ${requestId}:`, finalErr.message);
+        }
+      }
+    }
+  }
 }
 
 /* ===================== POLLING ===================== */
